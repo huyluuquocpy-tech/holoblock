@@ -113,7 +113,7 @@ const loadBoard = async () => {
     });
     const data = await res.json();
     return Array.isArray(data.record) ? data.record : [];
-  } catch { return []; }
+  } catch(e) { return []; }
 };
 
 const saveScore = async (nickname, score) => {
@@ -135,7 +135,7 @@ const saveScore = async (nickname, score) => {
       headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
       body: JSON.stringify(board)
     });
-  } catch {}
+  } catch(e) {}
   return board;
 };
 
@@ -156,7 +156,7 @@ const beep = (freq, dur, type = 'sine', vol = 0.1) => {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
     osc.connect(gain).connect(ctx.destination);
     osc.start(); osc.stop(ctx.currentTime + dur);
-  } catch {}
+  } catch(e) {}
 };
 const sfxPlace  = ()  => beep(520, 0.04, 'sine', 0.07);
 const sfxClear  = n   => { beep(660+n*60,0.1,'sine',0.12); setTimeout(()=>beep(880+n*60,0.09,'sine',0.09),75); };
@@ -460,7 +460,7 @@ function HoloBlock() {
     if (APU.current) return;
     e.preventDefault();
     const piece = T.current[idx]; if (!piece) return;
-    try { getAudio(); } catch {}
+    try { getAudio(); } catch(e) {}
     const t = e.touches?.[0] || e;
     dragState.current = { idx, piece, x: t.clientX, y: t.clientY, preview: null, previewValid: false };
     setDragVisible({ piece });
@@ -622,7 +622,7 @@ function HoloBlock() {
 
   const startGame = useCallback(async (name) => {
     if (!name.trim()) return;
-    try { getAudio(); } catch {}
+    try { getAudio(); } catch(e) {}
     const b = await loadBoard();
     const player = b.find(p => p.nickname === name);
     setCurrentNick(name);
@@ -645,7 +645,13 @@ function HoloBlock() {
     setBoard(nb); setScreen('result');
   }, [currentNick]);
 
-  const cp  = Math.floor((Math.min(window.innerWidth - 16, 420) - 6 - (gs-1)) / gs);
+  const [winW, setWinW] = useState(typeof window !== 'undefined' ? window.innerWidth : 375);
+  useEffect(() => {
+    const onResize = () => setWinW(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const cp  = Math.floor((Math.min(winW - 16, 420) - 6 - (gs-1)) / gs);
   const aw  = cp * gs + (gs-1) + 6;
   const lvlProg = level===1 ? Math.min(score/700,1) : level===2 ? Math.min((score-700)/800,1) : 1;
   const myRank  = board.findIndex(p => p.nickname === currentNick) + 1;
