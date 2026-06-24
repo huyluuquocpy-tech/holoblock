@@ -449,6 +449,7 @@ function HoloBlock() {
 
   const onMove = useCallback((e) => {
     if (!dragState.current) return;
+    e.preventDefault(); // Chặn scroll khi đang kéo khối trên mobile
     const t = e.touches?.[0] || e;
     dragState.current.x = t.clientX;
     dragState.current.y = t.clientY;
