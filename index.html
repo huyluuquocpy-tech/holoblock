@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+
+<html lang="vi">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>HOLOBLOCK — Block Puzzle</title>
+<meta name="description" content="HOLOBLOCK – game xếp hình neon cực đỉnh. Kéo thả khối, combo, streak, bảng xếp hạng!"/>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0;}
+  html,body{height:100%;background:#000;overflow-x:hidden;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script>const _cw=console.warn;console.warn=(...a)=>{if(a[0]&&String(a[0]).includes("Babel"))return;_cw(...a);};</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback, memo, useMemo } = React;
+
+// ═══════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════
+const SHAPES = [
+  [[0,0]],[[0,0],[0,1]],[[0,0],[1,0]],
+  [[0,0],[0,1],[0,2]],[[0,0],[1,0],[2,0]],
+  [[0,0],[0,1],[1,0],[1,1]],
+  [[0,0],[1,0],[2,0],[2,1]],[[0,1],[1,1],[2,0],[2,1]],
+  [[0,0],[0,1],[0,2],[1,1]],[[0,1],[0,2],[1,0],[1,1]],
+  [[0,0],[0,1],[1,1],[1,2]],
+  [[0,0],[0,1],[0,2],[0,3]],[[0,0],[1,0],[2,0],[3,0]],
+  [[0,0],[0,1],[1,0]],[[0,0],[0,1],[1,1]],
+  [[0,0],[1,0],[1,1]],[[0,1],[1,0],[1,1]],
+  [[0,0],[0,1],[0,2],[1,2]],[[0,0],[0,1],[0,2],[1,0]],
+  [[0,0],[1,0],[2,0],[0,1]],
+];
+const COLORS = [
+  { id:1, a:'#00f0ff', b:'#0044ff', glow:'#00ccff', rgb:'0,180,255' },
+  { id:2, a:'#ff00cc', b:'#8800ff', glow:'#dd00ff', rgb:'200,0,255' },
+  { id:3, a:'#ffee00', b:'#ff5500', glow:'#ffbb00', rgb:'255,160,0' },
+  { id:4, a:'#00ffaa', b:'#00aaff', glow:'#00ffdd', rgb:'0,220,200' },
+  { id:5, a:'#ff66aa', b:'#ff0044', glow:'#ff3377', rgb:'255,40,100' },
+];
+const LEVEL_SIZES = [9, 7, 5];
+
+// ═══════════════════════════════════════════
+// LOGIC HELPERS
+// ═══════════════════════════════════════════
+const makeCell  = () => ({ id: 0, lucky: false });
+const makeGrid  = n  => Array.from({ length: n }, () => Array.from({ length: n }, makeCell));
+const randPiece = () => ({
+  cells: SHAPES[Math.floor(Math.random() * SHAPES.length)],
+  color: COLORS[Math.floor(Math.random() * COLORS.length)],
+  key: Math.random(),
+});
+const freshTray = () => [randPiece(), randPiece(), randPiece()];
+
+const canFit = (grid, cells, r0, c0) => {
+  const n = grid.length;
+  return cells.every(([dr, dc]) => {
+    const r = r0 + dr, c = c0 + dc;
+    return r >= 0 && r < n && c >= 0 && c < n && grid[r][c].id === 0;
+  });
+};
+const doPlace = (grid, cells, r0, c0, colorId, lucky = false) => {
+  const g = grid.map(row => [...row]);
+  cells.forEach(([dr, dc]) => { g[r0 + dr][c0 + dc] = { id: colorId, lucky }; });
+  return g;
+};
+const doClear = grid => {
+  const n = grid.length;
+  const rows = [], cols = [];
+  for (let r = 0; r < n; r++) if (grid[r].every(v => v.id > 0)) rows.push(r);
+  for (let c = 0; c < n; c++) if (grid.every(row => row[c].id > 0)) cols.push(c);
+  if (!rows.length && !cols.length) return { grid, rows, cols, count: 0, luckies: 0 };
+  const g = grid.map(row => [...row]);
+  let luckies = 0;
+  rows.forEach(r => { for (let c = 0; c < n; c++) { if (g[r][c].lucky) luckies++; g[r][c] = makeCell(); } });
+  cols.forEach(c => { for (let r = 0; r < n; r++) { if (g[r][c].lucky) luckies++; g[r][c] = makeCell(); } });
+  return { grid: g, rows, cols, count: rows.length * n + cols.length * n - rows.length * cols.length, luckies };
+};
+const anyMove = (grid, tray) => {
+  const n = grid.length;
+  return tray.filter(Boolean).some(p =>
+    Array.from({ length: n * n }, (_, i) =>
+      canFit(grid, p.cells, Math.floor(i / n), i % n)
+    ).some(Boolean)
+  );
+};
+const emptyRatio = grid => {
+  const n = grid.length;
+  const empty = grid.flat().filter(c => c.id === 0).length;
+  return empty / (n * n);
+};
+
+// ═══════════════════════════════════════════
+// STORAGE — dùng localStorage (offline-ready)
+// ═══════════════════════════════════════════
+const STORAGE_KEY = 'holo_lb4';
+const loadBoard = () => {
+  try { const v = localStorage.getItem(STORAGE_KEY); return v ? JSON.parse(v) : []; }
+  catch { return []; }
+};
+const saveScore = (nickname, score) => {
+  const board = loadBoard();
+  const now   = new Date().toISOString();
+  const idx   = board.findIndex(p => p.nickname === nickname);
+  if (idx >= 0) {
+    if (score > board[idx].best) board[idx].best = score;
+    board[idx].last   = score;
+    board[idx].games  = (board[idx].games || 1) + 1;
+    board[idx].lastAt = now;
+  } else {
+    board.push({ nickname, best: score, last: score, games: 1, joinedAt: now, lastAt: now });
+  }
+  board.sort((a, b) => b.best - a.best);
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(board)); } catch {}
+  return board;
+};
+
+// ═══════════════════════════════════════════
+// AUDIO
+// ═══════════════════════════════════════════
+let audioCtx = null;
+const getAudio = () => {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+};
+const beep = (freq, dur, type = 'sine', vol = 0.1) => {
+  try {
+    const ctx = getAudio(); if (ctx.state === 'suspended') ctx.resume();
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = type; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(); osc.stop(ctx.currentTime + dur);
+  } catch {}
+};
+const sfxPlace  = ()  => beep(520, 0.04, 'sine', 0.07);
+const sfxClear  = n   => { beep(660+n*60,0.1,'sine',0.12); setTimeout(()=>beep(880+n*60,0.09,'sine',0.09),75); };
+const sfxCombo  = n   => [660,880,1100].slice(0,Math.min(n,3)).forEach((f,i)=>setTimeout(()=>beep(f,0.07,'square',0.08),i*55));
+const sfxLucky  = ()  => beep(1300, 0.1, 'sine', 0.12);
+const sfxLvlUp  = ()  => [440,550,660].forEach((f,i)=>setTimeout(()=>beep(f,0.13,'sine',0.1),i*70));
+const sfxGetPU  = ()  => [880,1100,1320].forEach((f,i)=>setTimeout(()=>beep(f,0.08,'sine',0.1),i*40));
+const sfxBomb   = ()  => { beep(200,0.3,'sawtooth',0.15); setTimeout(()=>beep(100,0.4,'sine',0.12),50); };
+const sfxHammer = ()  => { beep(350,0.08,'square',0.12); setTimeout(()=>beep(250,0.2,'sawtooth',0.1),80); };
+const sfxStreak = n   => { const f=[523,659,784,1047,1319]; f.slice(0,Math.min(n,5)).forEach((fr,i)=>setTimeout(()=>beep(fr,0.06,'square',0.08),i*40)); };
+const sfxDanger = ()  => { beep(220,0.08,'sawtooth',0.06); setTimeout(()=>beep(180,0.08,'sawtooth',0.06),120); };
+
+// ═══════════════════════════════════════════
+// PIECE VIEW
+// ═══════════════════════════════════════════
+const PieceView = memo(({ cells, color, cellPx }) => {
+  const maxRow = Math.max(...cells.map(([r]) => r));
+  const maxCol = Math.max(...cells.map(([,c]) => c));
+  const rows = maxRow + 1, cols = maxCol + 1;
+  const filled = useMemo(() => new Set(cells.map(([r,c]) => `${r},${c}`)), [cells]);
+  return (
+    <div style={{ display:'grid', gridTemplateColumns:`repeat(${cols},${cellPx}px)`, gridTemplateRows:`repeat(${rows},${cellPx}px)`, gap:1 }}>
+      {Array.from({ length: rows * cols }, (_, i) => {
+        const r = Math.floor(i / cols), c = i % cols;
+        const on = filled.has(`${r},${c}`);
+        return (
+          <div key={`${r},${c}`} style={{
+            width: cellPx, height: cellPx,
+            borderRadius: Math.max(2, cellPx * 0.18),
+            background: on ? `linear-gradient(135deg,${color.a},${color.b})` : 'transparent',
+            boxShadow: on ? `0 0 7px rgba(${color.rgb},0.7),inset 0 1px 0 rgba(255,255,255,0.3)` : 'none',
+            border: on ? '1px solid rgba(255,255,255,0.2)' : 'none',
+          }} />
+        );
+      })}
+    </div>
+  );
+});
+
+// ═══════════════════════════════════════════
+// GRID
+// ═══════════════════════════════════════════
+const Grid = memo(({ grid, gs, cellPx, flash, danger, onGridRef, onCellPointer }) => {
+  const containerRef = useRef(null);
+  useEffect(() => { if (containerRef.current) onGridRef(containerRef.current); }, [onGridRef]);
+  return (
+    <div ref={containerRef}
+      style={{
+        display: 'grid',
+        gridTemplateColumns: `repeat(${gs},${cellPx}px)`,
+        gap: 1, padding: 3,
+        background: danger ? 'rgba(60,0,0,0.3)' : 'rgba(255,255,255,0.015)',
+        border: danger ? '1.5px solid rgba(255,60,60,0.7)' : '1px solid rgba(255,255,255,0.06)',
+        borderRadius: 12,
+        animation: danger ? 'danger-pulse 0.8s ease-in-out infinite' : 'none',
+        transition: 'background 0.4s, border 0.4s',
+      }}
+      onMouseMove={onCellPointer}
+      onTouchMove={onCellPointer}
+    >
+      {grid.map((row, r) => row.map((cell, c) => {
+        const col     = cell.id ? COLORS.find(x => x.id === cell.id) : null;
+        const isFlash = flash.rows.includes(r) || flash.cols.includes(c);
+        const isLucky = cell.lucky && !isFlash;
+        return (
+          <div key={`${r},${c}`}
+            data-r={r} data-c={c}
+            onClick={e => onCellPointer(e, true)}
+            style={{
+              width: cellPx, height: cellPx,
+              borderRadius: Math.max(2, cellPx * 0.18),
+              background: isFlash ? '#ffffff'
+                : isLucky  ? 'linear-gradient(135deg,#ffee00,#ff8800)'
+                : col      ? `linear-gradient(135deg,${col.a},${col.b})`
+                :             'rgba(255,255,255,0.035)',
+              boxShadow: isFlash ? '0 0 20px white'
+                : isLucky ? '0 0 10px rgba(255,220,0,0.9),inset 0 1px 0 rgba(255,255,255,0.5)'
+                : col     ? `0 0 9px rgba(${col.rgb},0.55),inset 0 1px 0 rgba(255,255,255,0.3)`
+                :            'none',
+              border: isLucky ? '1px solid rgba(255,230,0,0.8)' : '1px solid rgba(255,255,255,0.08)',
+              animation: isFlash ? 'flash-cell 0.35s ease' : isLucky ? 'lucky-spin 1.2s ease-in-out infinite' : 'none',
+              transition: 'background 0.05s',
+            }}
+          />
+        );
+      }))}
+    </div>
+  );
+}, (prev, next) =>
+  prev.grid === next.grid && prev.gs === next.gs &&
+  prev.cellPx === next.cellPx && prev.flash === next.flash && prev.danger === next.danger
+);
+
+// ═══════════════════════════════════════════
+// LEADERBOARD PAGE
+// ═══════════════════════════════════════════
+const LeaderboardPage = ({ board, currentNick, onBack }) => {
+  const medals = ['🥇','🥈','🥉'];
+  const rankColors = ['#ffd700','#c0c0c0','#cd7f32'];
+  return (
+    <div style={{ minHeight:'100vh', background:'radial-gradient(ellipse 100% 75% at 50% -10%,#1c0440,#080018 40%,#000)', display:'flex', flexDirection:'column', alignItems:'center', padding:'16px 12px 32px' }}>
+      <div style={{ width:'100%', maxWidth:380, marginBottom:20 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:4 }}>
+          <button onClick={onBack} style={{ background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.15)', borderRadius:8, color:'rgba(255,255,255,0.7)', fontSize:12, cursor:'pointer', padding:'6px 14px', fontFamily:'monospace' }}>← BACK</button>
+          <div style={{ flex:1, textAlign:'center', fontSize:20, fontWeight:900, background:'linear-gradient(135deg,#ffd700,#ff8800)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent', letterSpacing:3, fontFamily:'monospace' }}>🏆 BẢNG XẾP HẠNG</div>
+          <div style={{ width:60 }} />
+        </div>
+        <div style={{ color:'rgba(255,255,255,0.25)', fontSize:9, fontFamily:'monospace', textAlign:'center', letterSpacing:2 }}>LƯU TRÊN THIẾT BỊ NÀY</div>
+      </div>
+
+      {board.length > 0 && (
+        <div style={{ width:'100%', maxWidth:380, display:'flex', gap:8, marginBottom:16 }}>
+          {[{ label:'NGƯỜI CHƠI', value: board.length }, { label:'TOP SCORE', value: board[0]?.best?.toLocaleString() }, { label:'TỔNG VÁN', value: board.reduce((s,p)=>s+(p.games||1),0) }].map(s => (
+            <div key={s.label} style={{ flex:1, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(0,255,187,0.15)', borderRadius:10, padding:'10px 6px', textAlign:'center' }}>
+              <div style={{ color:'rgba(255,255,255,0.35)', fontSize:7, fontFamily:'monospace', letterSpacing:1, marginBottom:4 }}>{s.label}</div>
+              <div style={{ color:'#00ffaa', fontSize:14, fontWeight:900, fontFamily:'monospace' }}>{s.value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ width:'100%', maxWidth:380, background:'rgba(255,255,255,0.03)', border:'1px solid rgba(0,255,187,0.18)', borderRadius:16, overflow:'hidden' }}>
+        {board.length === 0 ? (
+          <div style={{ padding:40, textAlign:'center', color:'rgba(255,255,255,0.3)', fontFamily:'monospace', fontSize:12 }}>Chưa có ai chơi — hãy là người đầu tiên!</div>
+        ) : (
+          <div style={{ maxHeight:'65vh', overflowY:'auto' }}>
+            {board.length >= 1 && (
+              <div style={{ padding:'20px 16px 16px', background:'linear-gradient(180deg,rgba(255,215,0,0.06),transparent)', borderBottom:'1px solid rgba(255,255,255,0.06)' }}>
+                <div style={{ display:'flex', justifyContent:'center', alignItems:'flex-end', gap:8, marginBottom:12 }}>
+                  {[1,0,2].map(i => {
+                    const p = board[i]; if (!p) return <div key={i} style={{ width:90 }} />;
+                    const h = i===0?85:i===1?70:58;
+                    return (
+                      <div key={i} style={{ display:'flex', flexDirection:'column', alignItems:'center', width:100 }}>
+                        <div style={{ fontSize:i===0?26:20, marginBottom:2 }}>{medals[i]}</div>
+                        <div style={{ width:i===0?52:42, height:i===0?52:42, borderRadius:'50%', background:`linear-gradient(135deg,${rankColors[i]}33,${rankColors[i]}11)`, border:`2px solid ${rankColors[i]}`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:i===0?16:13, fontWeight:900, fontFamily:'monospace', color:rankColors[i], marginBottom:6, boxShadow:`0 0 16px ${rankColors[i]}55` }}>
+                          {p.nickname.slice(0,2).toUpperCase()}
+                        </div>
+                        <div style={{ color:p.nickname===currentNick?'#00ffaa':rankColors[i], fontSize:9, fontFamily:'monospace', fontWeight:900, textAlign:'center', maxWidth:90, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p.nickname}</div>
+                        <div style={{ color:'#fff', fontSize:i===0?13:11, fontWeight:900, fontFamily:'monospace', marginTop:2 }}>{p.best.toLocaleString()}</div>
+                        <div style={{ height:h, background:`linear-gradient(180deg,${rankColors[i]}33,${rankColors[i]}11)`, border:`1px solid ${rankColors[i]}44`, borderBottom:'none', borderRadius:'4px 4px 0 0', width:'100%', marginTop:6 }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            {board.slice(3).map((p, i) => {
+              const rank = i + 4, isMe = p.nickname === currentNick;
+              return (
+                <div key={p.nickname} style={{ display:'flex', alignItems:'center', gap:10, padding:'11px 16px', background:isMe?'rgba(0,255,170,0.08)':rank%2===0?'rgba(255,255,255,0.015)':'transparent', borderBottom:'1px solid rgba(255,255,255,0.04)', border:isMe?'1px solid rgba(0,255,170,0.2)':undefined }}>
+                  <div style={{ width:28, textAlign:'center', color:'rgba(255,255,255,0.35)', fontSize:11, fontFamily:'monospace', fontWeight:900 }}>#{rank}</div>
+                  <div style={{ width:32, height:32, borderRadius:'50%', background:'rgba(255,255,255,0.06)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:11, fontWeight:900, fontFamily:'monospace', color:isMe?'#00ffaa':'rgba(255,255,255,0.6)', border:isMe?'1px solid rgba(0,255,170,0.4)':'1px solid rgba(255,255,255,0.1)', flexShrink:0 }}>{p.nickname.slice(0,2).toUpperCase()}</div>
+                  <div style={{ flex:1, overflow:'hidden' }}>
+                    <div style={{ color:isMe?'#00ffaa':'rgba(255,255,255,0.85)', fontSize:12, fontFamily:'monospace', fontWeight:isMe?900:400, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{p.nickname}{isMe?' ← BẠN':''}</div>
+                    <div style={{ color:'rgba(255,255,255,0.25)', fontSize:9, fontFamily:'monospace' }}>{p.games||1} ván đã chơi</div>
+                  </div>
+                  <div style={{ color:'#00ffaa', fontWeight:900, fontSize:13, fontFamily:'monospace' }}>{p.best.toLocaleString()}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <div style={{ color:'rgba(255,255,255,0.15)', fontSize:8, fontFamily:'monospace', marginTop:16, textAlign:'center' }}>Điểm lưu tự động trên thiết bị này sau mỗi ván</div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════
+// MAIN GAME
+// ═══════════════════════════════════════════
+function HoloBlock() {
+  const [screen,      setScreen]      = useState('login');
+  const [nickname,    setNickname]    = useState('');
+  const [board,       setBoard]       = useState(() => loadBoard());
+  const [currentNick, setCurrentNick] = useState('');
+
+  const [gs,         setGs]        = useState(9);
+  const [grid,       setGrid]      = useState(() => makeGrid(9));
+  const [tray,       setTray]      = useState(() => freshTray());
+  const [score,      setScore]     = useState(0);
+  const [best,       setBest]      = useState(0);
+  const [level,      setLevel]     = useState(1);
+  const [combo,      setCombo]     = useState(0);
+  const [flash,      setFlash]     = useState({ rows:[], cols:[] });
+  const [gameOver,   setGameOver]  = useState(false);
+  const [powerups,   setPowerups]  = useState([]);
+  const [activePU,   setActivePU]  = useState(null);
+  const [hammerMode, setHammerMode]= useState(null);
+  const [lvlMsg,     setLvlMsg]    = useState(null);
+  const [comboAnim,  setComboAnim] = useState(null);
+  const [scoreAnim,  setScoreAnim] = useState(false);
+  const [scorePops,  setScorePops] = useState([]);
+  const [particles,  setParticles] = useState([]);
+  const [streakFire,  setStreakFire]  = useState(false);
+  const [streakCount, setStreakCount] = useState(0);
+  const [danger,      setDanger]      = useState(false);
+  const [luckyPopMsg, setLuckyPopMsg] = useState(null);
+  const prevDanger = useRef(false);
+
+  const dragState    = useRef(null);
+  const [dragVisible, setDragVisible] = useState(null);
+
+  const G   = useRef(grid);
+  const T   = useRef(tray);
+  const S   = useRef(0);
+  const C   = useRef(0);
+  const L   = useRef(1);
+  const GS  = useRef(9);
+  const PU  = useRef([]);
+  const APU = useRef(null);
+  const HM  = useRef(null);
+  const B   = useRef(0);
+  const puIdRef  = useRef(0);
+  const popIdRef = useRef(0);
+  const pidRef   = useRef(0);
+  const gridElRef = useRef(null);
+  const rafRef    = useRef(null);
+
+  useEffect(() => { G.current   = grid;      }, [grid]);
+  useEffect(() => { T.current   = tray;      }, [tray]);
+  useEffect(() => { S.current   = score;     }, [score]);
+  useEffect(() => { C.current   = combo;     }, [combo]);
+  useEffect(() => { L.current   = level;     }, [level]);
+  useEffect(() => { GS.current  = gs;        }, [gs]);
+  useEffect(() => { PU.current  = powerups;  }, [powerups]);
+  useEffect(() => { APU.current = activePU;  }, [activePU]);
+  useEffect(() => { HM.current  = hammerMode;}, [hammerMode]);
+  useEffect(() => { B.current   = best;      }, [best]);
+
+  useEffect(() => {
+    const ratio = emptyRatio(grid);
+    const isDanger = ratio < 0.20;
+    setDanger(isDanger);
+    if (isDanger && !prevDanger.current) sfxDanger();
+    prevDanger.current = isDanger;
+  }, [grid]);
+
+  useEffect(() => {
+    setStreakFire(combo >= 3);
+    setStreakCount(combo);
+  }, [combo]);
+
+  const getCellAt = useCallback((cx, cy, cells) => {
+    const el = gridElRef.current; if (!el) return null;
+    const cell00 = el.querySelector('[data-r="0"][data-c="0"]');
+    const cell01 = el.querySelector('[data-r="0"][data-c="1"]');
+    const cell10 = el.querySelector('[data-r="1"][data-c="0"]');
+    let cpX, cpY, originX, originY;
+    if (cell00 && cell01 && cell10) {
+      const b00 = cell00.getBoundingClientRect();
+      const b01 = cell01.getBoundingClientRect();
+      const b10 = cell10.getBoundingClientRect();
+      cpX = b01.left - b00.left;
+      cpY = b10.top  - b00.top;
+      originX = b00.left;
+      originY = b00.top;
+    } else {
+      const rect = el.getBoundingClientRect();
+      cpX = cpY = (rect.width - 6) / GS.current;
+      originX = rect.left + 3;
+      originY = rect.top  + 3;
+    }
+    const ptrCol = Math.floor((cx - originX) / cpX);
+    const ptrRow = Math.floor((cy - originY) / cpY);
+    const maxDr = Math.max(...cells.map(([r]) => r));
+    const maxDc = Math.max(...cells.map(([,c]) => c));
+    return {
+      row: ptrRow - Math.round(maxDr / 2),
+      col: ptrCol - Math.round(maxDc / 2),
+    };
+  }, []);
+
+  const dragLoop = useCallback(() => {
+    const d = dragState.current; if (!d) return;
+    const { x, y, piece } = d;
+    const ghostEl = document.getElementById('drag-ghost');
+    if (ghostEl) {
+      ghostEl.style.left      = x + 'px';
+      ghostEl.style.top       = y + 'px';
+      ghostEl.style.transform = 'translate(-50%, -50%)';
+      ghostEl.style.display   = 'block';
+    }
+    const pos = getCellAt(x, y, piece.cells);
+    if (pos) {
+      const valid = canFit(G.current, piece.cells, pos.row, pos.col);
+      dragState.current.preview      = valid ? pos : null;
+      dragState.current.previewValid = valid;
+    }
+    rafRef.current = requestAnimationFrame(dragLoop);
+  }, [getCellAt]);
+
+  const startDrag = useCallback((e, idx) => {
+    if (APU.current) return;
+    e.preventDefault();
+    const piece = T.current[idx]; if (!piece) return;
+    try { getAudio(); } catch {}
+    const t = e.touches?.[0] || e;
+    dragState.current = { idx, piece, x: t.clientX, y: t.clientY, preview: null, previewValid: false };
+    setDragVisible({ piece });
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(dragLoop);
+  }, [dragLoop]);
+
+  const onMove = useCallback((e) => {
+    if (!dragState.current) return;
+    const t = e.touches?.[0] || e;
+    dragState.current.x = t.clientX;
+    dragState.current.y = t.clientY;
+  }, []);
+
+  const onEnd = useCallback(() => {
+    cancelAnimationFrame(rafRef.current);
+    const d = dragState.current;
+    dragState.current = null;
+    setDragVisible(null);
+    const ghostEl = document.getElementById('drag-ghost');
+    if (ghostEl) ghostEl.style.display = 'none';
+    if (!d || !d.preview || !d.previewValid) return;
+    if (!canFit(G.current, d.piece.cells, d.preview.row, d.preview.col)) return;
+
+    sfxPlace();
+    const lucky = Math.random() < 0.10 && C.current >= 1;
+    let g       = doPlace(G.current, d.piece.cells, d.preview.row, d.preview.col, d.piece.color.id, lucky);
+    const res   = doClear(g);
+    const lines = res.rows.length + res.cols.length;
+    let gained  = d.piece.cells.length * 5;
+    const newPUs = [...PU.current];
+    let puMsg = '';
+
+    if (lines > 0) {
+      const mult = lines >= 3 ? 2.5 : lines >= 2 ? 1.5 : 1;
+      gained += Math.floor(res.count * 8 * mult);
+      if (res.luckies > 0) {
+        gained += res.luckies * 200; gained *= 2; sfxLucky();
+        setLuckyPopMsg(`✨ LUCKY ×2! +${res.luckies * 200}`);
+        setTimeout(() => setLuckyPopMsg(null), 1800);
+      }
+      const nc = C.current + 1;
+      if (nc >= 3) sfxStreak(nc);
+      if (nc >= 2) {
+        gained = Math.floor(gained * (1 + nc * 0.2));
+        setComboAnim(`${nc >= 3 ? '🔥' : '⚡'} COMBO ×${nc}`);
+        sfxCombo(nc);
+        setTimeout(() => setComboAnim(null), 1200);
+      } else { sfxClear(lines); }
+      setCombo(nc); C.current = nc;
+      if (lines >= 3) { newPUs.push({ type:'bomb',   id: ++puIdRef.current }); puMsg = ' 💣'; sfxGetPU(); }
+      if (lines === 2) { newPUs.push({ type:'hammer', id: ++puIdRef.current }); puMsg = ' 🔨'; sfxGetPU(); }
+      setFlash({ rows: res.rows, cols: res.cols });
+      setTimeout(() => setFlash({ rows:[], cols:[] }), 350);
+      const ps = Array.from({ length: 6 }, (_, i) => ({
+        id: ++pidRef.current, color: d.piece.color.glow, rgb: d.piece.color.rgb,
+        angle: (i / 6) * 360 + Math.random() * 20, dist: 50 + Math.random() * 55,
+      }));
+      setParticles(p => [...p, ...ps]);
+      setTimeout(() => setParticles(p => p.filter(x => !ps.find(y => y.id === x.id))), 850);
+    } else { setCombo(0); C.current = 0; }
+
+    const ns = S.current + gained;
+    G.current = res.grid; S.current = ns;
+    let nt = T.current.map((t2,i) => i === d.idx ? null : t2);
+    if (nt.every(t2 => !t2)) nt = freshTray();
+    T.current = nt;
+
+    const pid = ++popIdRef.current;
+    setScorePops(p => [...p, { id: pid, text: `+${gained}${puMsg}` }]);
+    setTimeout(() => setScorePops(p => p.filter(x => x.id !== pid)), 1000);
+
+    setGrid(res.grid); setTray([...nt]); setScore(ns);
+    if (ns > B.current) { setBest(ns); B.current = ns; }
+    if (newPUs.length !== PU.current.length) { PU.current = newPUs; setPowerups([...newPUs]); }
+    setScoreAnim(true); setTimeout(() => setScoreAnim(false), 250);
+
+    const newLvl = ns >= 1500 ? 3 : ns >= 700 ? 2 : 1;
+    if (newLvl > L.current) {
+      const prevSz = LEVEL_SIZES[L.current - 1];
+      const nextSz = LEVEL_SIZES[newLvl - 1];
+      L.current = newLvl; GS.current = nextSz;
+      const newG = makeGrid(nextSz), newT = freshTray();
+      G.current = newG; T.current = newT; C.current = 0;
+      setLevel(newLvl); setGs(nextSz); setGrid(newG); setTray(newT); setCombo(0);
+      setLvlMsg(`${prevSz}×${prevSz} → ${nextSz}×${nextSz}`);
+      sfxLvlUp();
+      setTimeout(() => setLvlMsg(null), 2400);
+    }
+    if (!anyMove(res.grid, nt.filter(Boolean))) setTimeout(() => setGameOver(true), 350);
+  }, []);
+
+  useEffect(() => {
+    const mv = e => onMove(e);
+    const up = () => onEnd();
+    window.addEventListener('mousemove', mv, { passive: true });
+    window.addEventListener('mouseup',   up, { passive: true });
+    window.addEventListener('touchmove', mv, { passive: false });
+    window.addEventListener('touchend',  up, { passive: true });
+    return () => {
+      window.removeEventListener('mousemove', mv);
+      window.removeEventListener('mouseup',   up);
+      window.removeEventListener('touchmove', mv);
+      window.removeEventListener('touchend',  up);
+    };
+  }, [onMove, onEnd]);
+
+  const activatePU = useCallback((pu) => {
+    if (APU.current?.id === pu.id) { setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null; return; }
+    setActivePU({ type: pu.type, id: pu.id }); APU.current = { type: pu.type, id: pu.id };
+    if (pu.type === 'hammer') { setHammerMode('row'); HM.current = 'row'; }
+  }, []);
+
+  const cancelPU = useCallback(() => {
+    setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
+  }, []);
+
+  const handleCellClick = useCallback((r, c) => {
+    const apu = APU.current; if (!apu) return;
+    const n = GS.current;
+    if (apu.type === 'bomb') {
+      sfxBomb();
+      const newG = G.current.map(row => [...row]); const flashR = [];
+      for (let dr=-1;dr<=2;dr++) for (let dc=-1;dc<=2;dc++) {
+        const nr=r+dr, nc=c+dc;
+        if (nr>=0&&nr<n&&nc>=0&&nc<n) { newG[nr][nc]=makeCell(); if (!flashR.includes(nr)) flashR.push(nr); }
+      }
+      G.current=newG; setFlash({ rows:flashR, cols:[] }); setTimeout(()=>setFlash({ rows:[],cols:[] }),350);
+      const ns=S.current+150; S.current=ns; setGrid(newG); setScore(ns);
+      if (ns>B.current) { setBest(ns); B.current=ns; }
+      const pid=++popIdRef.current;
+      setScorePops(p=>[...p,{ id:pid,text:'+150 💣' }]);
+      setTimeout(()=>setScorePops(p=>p.filter(x=>x.id!==pid)),1000);
+    } else {
+      sfxHammer();
+      const mode=HM.current||'row'; const newG=G.current.map(row=>[...row]); const flashR=[],flashC=[];
+      if (mode==='row') { for (let cc=0;cc<n;cc++) newG[r][cc]=makeCell(); flashR.push(r); }
+      else { for (let rr=0;rr<n;rr++) newG[rr][c]=makeCell(); flashC.push(c); }
+      G.current=newG; setFlash({ rows:flashR, cols:flashC }); setTimeout(()=>setFlash({ rows:[],cols:[] }),350);
+      const ns=S.current+100; S.current=ns; setGrid(newG); setScore(ns);
+      if (ns>B.current) { setBest(ns); B.current=ns; }
+      const pid=++popIdRef.current;
+      setScorePops(p=>[...p,{ id:pid,text:'+100 🔨' }]);
+      setTimeout(()=>setScorePops(p=>p.filter(x=>x.id!==pid)),1000);
+    }
+    const newPUs=PU.current.filter(p=>p.id!==apu.id);
+    PU.current=newPUs; setPowerups([...newPUs]);
+    setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
+  }, []);
+
+  const onCellPointer = useCallback((e, isClick=false) => {
+    if (!APU.current) return;
+    const target = e.target?.closest?.('[data-r]') || e.target;
+    if (!target?.dataset?.r) return;
+    const r = parseInt(target.dataset.r), c = parseInt(target.dataset.c);
+    if (isClick) { handleCellClick(r, c); }
+  }, [handleCellClick]);
+
+  const startGame = useCallback((name) => {
+    if (!name.trim()) return;
+    try { getAudio(); } catch {}
+    const b = loadBoard();
+    const player = b.find(p => p.nickname === name);
+    setCurrentNick(name);
+    const pb = player?.best || 0; setBest(pb); B.current=pb;
+    L.current=1; GS.current=9; C.current=0; S.current=0;
+    const g=makeGrid(9), t=freshTray();
+    G.current=g; T.current=t;
+    setGs(9); setGrid(g); setTray(t); setScore(0); setLevel(1); setCombo(0);
+    setGameOver(false); setParticles([]); setFlash({ rows:[],cols:[] });
+    setPowerups([]); PU.current=[];
+    setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
+    setScorePops([]); setLvlMsg(null); setComboAnim(null);
+    setStreakFire(false); setStreakCount(0); setDanger(false); prevDanger.current=false;
+    dragState.current=null; setDragVisible(null);
+    setScreen('game');
+  }, []);
+
+  const endGame = useCallback(() => {
+    const nb = saveScore(currentNick, S.current);
+    setBoard(nb); setScreen('result');
+  }, [currentNick]);
+
+  const cp  = Math.floor((Math.min(window.innerWidth - 16, 420) - 6 - (gs-1)) / gs);
+  const aw  = cp * gs + (gs-1) + 6;
+  const lvlProg = level===1 ? Math.min(score/700,1) : level===2 ? Math.min((score-700)/800,1) : 1;
+  const myRank  = board.findIndex(p => p.nickname === currentNick) + 1;
+
+  const CSS = `
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    body{margin:0;background:#000;}
+    @keyframes glow-in{from{opacity:0;transform:scale(0.85)}to{opacity:1;transform:scale(1)}}
+    @keyframes pop{0%{transform:scale(1)}40%{transform:scale(1.22)}100%{transform:scale(1)}}
+    @keyframes combo-in{0%{opacity:0;transform:translate(-50%,-50%) scale(0.4)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.1)}70%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(0.8)}}
+    @keyframes lvl-in{0%{opacity:0;transform:translate(-50%,-50%) scale(0.6)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.02)}70%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(0.9)}}
+    @keyframes flash-cell{0%,100%{opacity:1}45%{opacity:0;background:white!important}}
+    @keyframes lucky-spin{0%{box-shadow:0 0 10px rgba(255,220,0,0.9);background:linear-gradient(135deg,#ffee00,#ff8800)!important}50%{box-shadow:0 0 18px rgba(255,240,0,1),0 0 30px rgba(255,180,0,0.5);background:linear-gradient(135deg,#ffff44,#ffaa00)!important}100%{box-shadow:0 0 10px rgba(255,220,0,0.9);background:linear-gradient(135deg,#ffee00,#ff8800)!important}}
+    @keyframes fly{to{transform:translate(var(--tx),var(--ty)) scale(0);opacity:0}}
+    @keyframes score-pop{0%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}100%{opacity:0;transform:translateX(-50%) translateY(-50px) scale(0.8)}}
+    @keyframes lucky-pop{0%{opacity:0;transform:translate(-50%,-50%) scale(0.5)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.15)}75%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(0.9) translateY(-20px)}}
+    @keyframes pu-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+    @keyframes pu-in{from{opacity:0;transform:scale(0.4)}to{opacity:1;transform:scale(1)}}
+    @keyframes danger-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,40,40,0);border-color:rgba(255,60,60,0.7)}50%{box-shadow:0 0 0 6px rgba(255,40,40,0.15);border-color:rgba(255,100,100,1)}}
+    @keyframes fire-border{0%,100%{box-shadow:0 0 12px rgba(255,100,0,0.4),0 0 0 2px rgba(255,80,0,0.6)}50%{box-shadow:0 0 28px rgba(255,140,0,0.7),0 0 0 2px rgba(255,160,0,0.9)}}
+    @keyframes streak-badge{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+    @keyframes danger-icon{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.6;transform:scale(1.15)}}
+  `;
+  const BG = { minHeight:'100vh', background:'radial-gradient(ellipse 100% 75% at 50% -10%,#1c0440 0%,#080018 40%,#000 100%)', display:'flex', flexDirection:'column', alignItems:'center', padding:'12px 8px 28px', userSelect:'none', WebkitUserSelect:'none' };
+
+  // ── LEADERBOARD ──
+  if (screen === 'leaderboard') return (
+    <><style>{CSS}</style>
+
+    <LeaderboardPage board={board} currentNick={currentNick} onBack={() => setScreen('login')} />
+</>
+  );
+
+// ── LOGIN ──
+if (screen === 'login') return (
+<><style>{CSS}</style>
+<div style={{ ...BG, justifyContent:'center' }}>
+<div style={{ animation:'glow-in 0.5s ease', maxWidth:320, width:'100%' }}>
+<div style={{ textAlign:'center', marginBottom:24 }}>
+<div style={{ fontSize:46, fontWeight:900, background:'linear-gradient(135deg,#00f0ff,#ff00cc)', WebkitBackgroundClip:'text', backgroundClip:'text', color:'transparent', letterSpacing:2, fontFamily:'monospace' }}>HOLOBLOCK</div>
+<div style={{ color:'#00ffaa', fontSize:10, letterSpacing:3, fontFamily:'monospace', marginTop:3 }}>BLOCK PUZZLE · v3.0</div>
+</div>
+
+    <div style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(0,255,187,0.25)', borderRadius:18, padding:20, marginBottom:12 }}>
+      <input type="text" placeholder="Nhập nickname của bạn..." value={nickname}
+        onChange={e => setNickname(e.target.value.slice(0,20))}
+        onKeyDown={e => e.key==='Enter' && startGame(nickname)}
+        style={{ width:'100%', padding:'11px 14px', borderRadius:10, border:'1px solid rgba(0,255,187,0.35)', background:'rgba(0,255,187,0.05)', color:'#fff', fontSize:14, fontFamily:'monospace', outline:'none', marginBottom:12, display:'block' }}
+      />
+      <button onClick={() => startGame(nickname)} disabled={!nickname.trim()}
+        style={{ width:'100%', padding:13, borderRadius:10, background:nickname.trim()?'linear-gradient(135deg,#00f0ff,#9900ff)':'rgba(255,255,255,0.1)', border:'none', color:'#fff', fontSize:15, fontWeight:900, cursor:nickname.trim()?'pointer':'not-allowed', letterSpacing:2, fontFamily:'monospace', boxShadow:nickname.trim()?'0 0 25px rgba(0,180,255,0.3)':'none' }}>
+        🎮 START GAME
+      </button>
+    </div>
+
+    <div style={{ background:'rgba(255,255,255,0.03)', border:'1px solid rgba(255,150,0,0.2)', borderRadius:14, padding:14, marginBottom:12 }}>
+      <div style={{ color:'#ffaa00', fontSize:10, fontWeight:900, fontFamily:'monospace', letterSpacing:2, textAlign:'center', marginBottom:10 }}>⚡ POWERUP GUIDE</div>
+      {[
+        { icon:'💣', label:'BOM', color:'#ff9999', cond:'Ăn 3+ hàng', desc:'Tap → chọn ô → phá vùng 4×4' },
+        { icon:'🔨', label:'BÚA', color:'#99ccff', cond:'Ăn 2 hàng',  desc:'Tap → chọn Hàng/Cột → xóa sạch' },
+        { icon:'🔥', label:'STREAK', color:'#ffaa44', cond:'Combo ≥ 3', desc:'Điểm nhân thêm theo chuỗi' },
+        { icon:'✨', label:'LUCKY', color:'#ffdd44', cond:'Random khi combo', desc:'Ô vàng → clear được → điểm ×2' },
+      ].map(p => (
+        <div key={p.label} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 10px', borderRadius:8, marginBottom:5, background:'rgba(255,255,255,0.03)' }}>
+          <span style={{ fontSize:18, flexShrink:0 }}>{p.icon}</span>
+          <div>
+            <span style={{ color:p.color, fontSize:10, fontWeight:900, fontFamily:'monospace' }}>{p.label} — {p.cond} </span>
+            <span style={{ color:'rgba(255,255,255,0.35)', fontSize:9, fontFamily:'monospace' }}>{p.desc}</span>
+          </div>
+        </div>
+      ))}
+    </div>
+
+    <div style={{ background:'rgba(255,255,255,0.03)', border:'1px solid rgba(0,255,187,0.2)', borderRadius:14, padding:16 }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+        <div style={{ color:'#00ffaa', fontSize:11, fontWeight:900, fontFamily:'monospace', letterSpacing:2 }}>🏆 TOP 15</div>
+        <button onClick={() => setScreen('leaderboard')} style={{ background:'rgba(0,255,187,0.08)', border:'1px solid rgba(0,255,187,0.3)', borderRadius:8, color:'#00ffaa', fontSize:9, fontFamily:'monospace', cursor:'pointer', padding:'5px 12px', fontWeight:900, letterSpacing:1 }}>XEM TẤT CẢ →</button>
+      </div>
+      {board.length === 0
+        ? <div style={{ color:'rgba(255,255,255,0.3)', textAlign:'center', fontSize:10, fontFamily:'monospace' }}>Chưa có dữ liệu — hãy chơi đầu tiên!</div>
+        : board.slice(0,15).map((p,i) => (
+            <div key={p.nickname} style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'6px 10px', background:i===0?'rgba(255,215,0,0.08)':'transparent', borderRadius:7, marginBottom:3 }}>
+              <span style={{ color:i===0?'#ffd700':i===1?'#c0c0c0':i===2?'#cd7f32':'rgba(255,255,255,0.65)', fontSize:11, fontFamily:'monospace' }}>
+                {i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`} {p.nickname}
+              </span>
+              <span style={{ color:'#00ffaa', fontWeight:900, fontSize:11, fontFamily:'monospace' }}>{p.best.toLocaleString()}</span>
+            </div>
+          ))
+      }
+    </div>
+  </div>
+</div>
+</>
+  );
+
+// ── GAME ──
+if (screen === 'game') return (
+<><style>{CSS}</style>
+<div style={BG}>
+<div style={{ width:'100%', maxWidth:aw, marginBottom:8 }}>
+<div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:5 }}>
+<span style={{ color:'#00ffaa', fontSize:10, fontFamily:'monospace', fontWeight:900 }}>{currentNick}</span>
+<div style={{ display:'flex', gap:6, alignItems:'center' }}>
+{danger && (
+<div style={{ display:'flex', alignItems:'center', gap:4, background:'rgba(255,40,40,0.15)', border:'1px solid rgba(255,60,60,0.5)', borderRadius:8, padding:'3px 8px', animation:'danger-icon 0.8s ease infinite' }}>
+<span style={{ fontSize:11 }}>⚠️</span>
+<span style={{ color:'#ff6666', fontSize:9, fontFamily:'monospace', fontWeight:900 }}>NGUY HIỂM</span>
+</div>
+)}
+{streakFire && (
+<div style={{ display:'flex', alignItems:'center', gap:3, background:'rgba(255,100,0,0.2)', border:'1px solid rgba(255,120,0,0.6)', borderRadius:8, padding:'3px 8px', animation:'streak-badge 0.6s ease infinite' }}>
+<span style={{ fontSize:12 }}>🔥</span>
+<span style={{ color:'#ffaa44', fontSize:10, fontFamily:'monospace', fontWeight:900 }}>×{streakCount}</span>
+</div>
+)}
+<button onClick={() => setScreen('login')} style={{ background:'none', border:'1px solid rgba(255,255,255,0.15)', borderRadius:6, color:'rgba(255,255,255,0.4)', fontSize:9, fontFamily:'monospace', cursor:'pointer', padding:'3px 8px' }}>MENU</button>
+</div>
+</div>
+
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-end', marginBottom:7 }}>
+      <div><div style={{ color:'rgba(255,255,255,0.3)', fontSize:7, letterSpacing:2, fontFamily:'monospace' }}>BEST</div><div style={{ color:'#ffd700', fontSize:14, fontWeight:900, fontFamily:'monospace' }}>{best.toLocaleString()}</div></div>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ color:'rgba(255,255,255,0.3)', fontSize:7, letterSpacing:2, fontFamily:'monospace' }}>SCORE</div>
+        <div style={{ color:'#fff', fontSize:34, fontWeight:900, fontFamily:'monospace', lineHeight:1, textShadow:'0 0 20px rgba(255,255,255,0.6)', animation:scoreAnim?'pop 0.25s ease':'none' }}>{score.toLocaleString()}</div>
+      </div>
+      <div style={{ textAlign:'right' }}><div style={{ color:'rgba(255,255,255,0.3)', fontSize:7, letterSpacing:2, fontFamily:'monospace' }}>LVL</div><div style={{ color:'#00ffbb', fontSize:14, fontWeight:900, fontFamily:'monospace' }}>{level}</div></div>
+    </div>
+
+    {level < 3 && (
+      <div style={{ height:2, background:'rgba(255,255,255,0.05)', borderRadius:1, overflow:'hidden' }}>
+        <div style={{ height:'100%', width:`${lvlProg*100}%`, background:'linear-gradient(90deg,#00f0ff,#aa00ff)', borderRadius:1, transition:'width 0.5s ease' }} />
+      </div>
+    )}
+  </div>
+
+  <div style={{ position:'relative', borderRadius:14, padding:streakFire?2:0, background:streakFire?'linear-gradient(135deg,#ff6600,#ff0000,#ff6600)':'transparent', animation:streakFire?'fire-border 0.6s ease infinite':'none', transition:'all 0.3s' }}>
+    <Grid grid={grid} gs={gs} cellPx={cp} flash={flash} danger={danger}
+      onGridRef={el => { gridElRef.current = el; }}
+      onCellPointer={onCellPointer}
+    />
+    {particles.map(p => (
+      <div key={p.id} style={{ position:'absolute', left:'50%', top:'50%', width:5, height:5, borderRadius:'50%', background:p.color, boxShadow:`0 0 8px rgba(${p.rgb},0.9)`, '--tx':`${Math.cos(p.angle*Math.PI/180)*p.dist}px`, '--ty':`${Math.sin(p.angle*Math.PI/180)*p.dist}px`, animation:'fly 0.7s ease-out forwards', pointerEvents:'none' }} />
+    ))}
+    {scorePops.map(sp => (
+      <div key={sp.id} style={{ position:'absolute', left:'50%', top:'18%', color:'#ffdd00', fontSize:13, fontWeight:900, fontFamily:'monospace', pointerEvents:'none', animation:'score-pop 1s ease forwards', whiteSpace:'nowrap', textShadow:'0 0 10px rgba(255,200,0,0.8)', zIndex:10 }}>{sp.text}</div>
+    ))}
+  </div>
+
+  {comboAnim && <div style={{ position:'fixed', top:'45%', left:'50%', color:streakFire?'#ff8833':'#ffdd00', fontSize:22, fontWeight:900, fontFamily:'monospace', letterSpacing:2, textShadow:`0 0 20px ${streakFire?'#ff6600':'#ffaa00'}`, animation:'combo-in 1.2s ease forwards', pointerEvents:'none', zIndex:500 }}>{comboAnim}</div>}
+  {luckyPopMsg && <div style={{ position:'fixed', top:'40%', left:'50%', color:'#ffee00', fontSize:18, fontWeight:900, fontFamily:'monospace', letterSpacing:1, textShadow:'0 0 25px rgba(255,220,0,0.9)', animation:'lucky-pop 1.8s ease forwards', pointerEvents:'none', zIndex:600, background:'rgba(0,0,0,0.7)', borderRadius:12, padding:'10px 20px', border:'1px solid rgba(255,220,0,0.4)', whiteSpace:'nowrap' }}>{luckyPopMsg}</div>}
+  {lvlMsg && <div style={{ position:'fixed', top:'38%', left:'50%', background:'rgba(0,0,0,0.95)', border:'1px solid rgba(0,255,187,0.35)', borderRadius:18, padding:'20px 35px', textAlign:'center', animation:'lvl-in 2.2s ease forwards', pointerEvents:'none', zIndex:900 }}><div style={{ color:'#00ffbb', fontSize:20, fontWeight:900, letterSpacing:4, fontFamily:'monospace' }}>LEVEL UP!</div><div style={{ color:'rgba(255,255,255,0.5)', fontSize:11, marginTop:6, fontFamily:'monospace' }}>{lvlMsg}</div></div>}
+
+  {activePU && (
+    <div style={{ width:'100%', maxWidth:aw, marginTop:8, padding:'10px 14px', background:activePU.type==='bomb'?'rgba(255,60,60,0.15)':'rgba(100,180,255,0.15)', border:`1px solid ${activePU.type==='bomb'?'rgba(255,100,100,0.5)':'rgba(100,180,255,0.5)'}`, borderRadius:12, animation:'pu-in 0.25s ease' }}>
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:activePU.type==='hammer'?8:0 }}>
+        <span style={{ fontSize:13, fontWeight:900, fontFamily:'monospace', color:activePU.type==='bomb'?'#ff9999':'#99ccff' }}>
+          {activePU.type==='bomb'?'💣 Tap ô để thả BOM (4×4)':'🔨 Chọn kiểu rồi tap ô cần xóa'}
+        </span>
+        <button onClick={cancelPU} style={{ background:'rgba(255,255,255,0.1)', border:'1px solid rgba(255,255,255,0.2)', borderRadius:8, color:'rgba(255,255,255,0.6)', fontSize:10, cursor:'pointer', padding:'5px 10px', fontFamily:'monospace' }}>HỦY</button>
+      </div>
+      {activePU.type === 'hammer' && (
+        <div style={{ display:'flex', gap:8 }}>
+          {['row','col'].map(m => (
+            <button key={m} onClick={() => { setHammerMode(m); HM.current=m; }}
+              style={{ flex:1, padding:'7px 0', borderRadius:8, border:`1px solid ${hammerMode===m?'rgba(100,180,255,0.8)':'rgba(255,255,255,0.2)'}`, background:hammerMode===m?'rgba(100,180,255,0.25)':'rgba(255,255,255,0.05)', color:hammerMode===m?'#99ccff':'rgba(255,255,255,0.5)', fontSize:11, cursor:'pointer', fontFamily:'monospace', fontWeight:900 }}>
+              {m==='row'?'📏 HÀNG NGANG':'📐 CỘT DỌC'}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )}
+
+  <div style={{ width:'100%', maxWidth:aw, marginTop:12 }}>
+    <div style={{ display:'flex', justifyContent:'space-around', alignItems:'center', height:90, background:'rgba(255,255,255,0.015)', border:'1px solid rgba(255,255,255,0.05)', borderRadius:14 }}>
+      {tray.map((piece, idx) => (
+        <div key={idx}
+          style={{ display:'flex', alignItems:'center', justifyContent:'center', width:80, height:80, cursor:piece&&!activePU?'grab':'default', opacity:piece?1:0.08, transition:'opacity 0.15s' }}
+          onMouseDown={piece&&!activePU ? e=>startDrag(e,idx) : undefined}
+          onTouchStart={piece&&!activePU ? e=>startDrag(e,idx) : undefined}
+        >
+          {piece && <PieceView cells={piece.cells} color={piece.color} cellPx={12} />}
+        </div>
+      ))}
+    </div>
+
+    {powerups.length > 0 && (
+      <div style={{ marginTop:10, padding:'10px 12px', background:'rgba(255,255,255,0.02)', border:'1px solid rgba(255,255,255,0.07)', borderRadius:12 }}>
+        <div style={{ color:'rgba(255,255,255,0.3)', fontSize:8, fontFamily:'monospace', letterSpacing:2, textAlign:'center', marginBottom:8 }}>KHO POWERUP — TAP ĐỂ DÙNG</div>
+        <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'center' }}>
+          {powerups.map(pu => {
+            const isBomb=pu.type==='bomb', isActive=activePU?.id===pu.id;
+            return (
+              <div key={pu.id} onClick={() => activatePU(pu)}
+                style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:3, padding:'8px 16px', borderRadius:10,
+                  background:isActive?(isBomb?'rgba(255,80,80,0.3)':'rgba(100,180,255,0.3)'):(isBomb?'rgba(255,60,60,0.1)':'rgba(100,180,255,0.1)'),
+                  border:`1px solid ${isActive?(isBomb?'rgba(255,140,140,0.9)':'rgba(140,200,255,0.9)'):(isBomb?'rgba(255,100,100,0.4)':'rgba(100,200,255,0.4)')}`,
+                  cursor:'pointer', animation:isActive?'pu-in 0.2s ease':'pu-float 2s ease-in-out infinite',
+                  boxShadow:isActive?(isBomb?'0 0 14px rgba(255,80,80,0.4)':'0 0 14px rgba(100,180,255,0.4)'):'none' }}>
+                <span style={{ fontSize:22 }}>{isBomb?'💣':'🔨'}</span>
+                <span style={{ fontSize:9, fontWeight:900, fontFamily:'monospace', color:isBomb?'#ff9999':'#99ccff' }}>{isBomb?'BOM':'BÚA'}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    )}
+  </div>
+
+  <div id="drag-ghost" style={{ position:'fixed', display:'none', pointerEvents:'none', zIndex:1000, filter:'drop-shadow(0 0 10px rgba(255,255,255,0.25))' }}>
+    {dragVisible?.piece && <PieceView cells={dragVisible.piece.cells} color={dragVisible.piece.color} cellPx={cp} />}
+  </div>
+
+  {gameOver && (
+    <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.88)', backdropFilter:'blur(6px)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:2000 }}>
+      <div style={{ background:'linear-gradient(135deg,rgba(20,4,45,0.98),rgba(5,0,20,0.98))', border:'1px solid rgba(255,40,100,0.35)', borderRadius:20, padding:'32px 36px', textAlign:'center', maxWidth:280, width:'90%' }}>
+        <div style={{ color:'#ff3366', fontSize:22, fontWeight:900, letterSpacing:4, fontFamily:'monospace', marginBottom:6 }}>GAME OVER</div>
+        {streakCount >= 3 && <div style={{ color:'#ff8833', fontSize:11, fontFamily:'monospace', marginBottom:10 }}>🔥 Best streak: ×{streakCount}</div>}
+        <div style={{ color:'rgba(255,255,255,0.35)', fontSize:8, letterSpacing:2, fontFamily:'monospace' }}>SCORE</div>
+        <div style={{ color:'#fff', fontSize:46, fontWeight:900, fontFamily:'monospace', lineHeight:1.1, margin:'4px 0 8px' }}>{score.toLocaleString()}</div>
+        {score >= best && score > 0 && <div style={{ color:'#ffd700', fontSize:10, fontFamily:'monospace', marginBottom:10 }}>🏆 NEW RECORD!</div>}
+        <button onClick={endGame} style={{ width:'100%', padding:12, borderRadius:10, background:'linear-gradient(135deg,#00f0ff,#9900ff)', border:'none', color:'#fff', fontSize:14, fontWeight:900, cursor:'pointer', letterSpacing:2, fontFamily:'monospace', marginBottom:8 }}>LƯU ĐIỂM & KẾT QUẢ</button>
+        <button onClick={() => startGame(currentNick)} style={{ width:'100%', padding:10, borderRadius:10, background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.15)', color:'rgba(255,255,255,0.7)', fontSize:12, cursor:'pointer', fontFamily:'monospace', marginBottom:6 }}>🔄 CHƠI LẠI NGAY</button>
+        <button onClick={() => setScreen('login')} style={{ width:'100%', padding:9, borderRadius:10, background:'transparent', border:'none', color:'rgba(255,255,255,0.35)', fontSize:11, cursor:'pointer', fontFamily:'monospace' }}>Về menu</button>
+      </div>
+    </div>
+  )}
+</div>
+</>
+  );
+
+// ── RESULT ──
+return (
+<><style>{CSS}</style>
+<div style={{ ...BG, justifyContent:'center' }}>
+<div style={{ maxWidth:320, width:'100%', animation:'glow-in 0.5s ease' }}>
+<div style={{ background:'rgba(255,255,255,0.04)', border:'1px solid rgba(0,255,187,0.25)', borderRadius:18, padding:28, textAlign:'center', marginBottom:14 }}>
+<div style={{ color:'#00ffaa', fontSize:26, fontWeight:900, letterSpacing:3, fontFamily:'monospace' }}>ĐIỂM ĐÃ LƯU</div>
+<div style={{ color:'#fff', fontSize:48, fontWeight:900, fontFamily:'monospace', margin:'10px 0 4px', textShadow:'0 0 25px rgba(255,255,255,0.5)' }}>{score.toLocaleString()}</div>
+{myRank > 0 && <div style={{ color:'#ffdd00', fontSize:12, fontFamily:'monospace', marginBottom:14 }}>Hạng #{myRank} / {board.length} người chơi</div>}
+<button onClick={() => startGame(currentNick)} style={{ width:'100%', padding:12, borderRadius:10, background:'linear-gradient(135deg,#00f0ff,#9900ff)', border:'none', color:'#fff', fontSize:14, fontWeight:900, cursor:'pointer', letterSpacing:2, fontFamily:'monospace', marginBottom:8 }}>🔄 CHƠI LẠI</button>
+<button onClick={() => setScreen('leaderboard')} style={{ width:'100%', padding:10, borderRadius:10, background:'rgba(255,215,0,0.08)', border:'1px solid rgba(255,215,0,0.3)', color:'#ffd700', fontSize:12, cursor:'pointer', fontFamily:'monospace', fontWeight:900, marginBottom:8 }}>🏆 XEM BẢNG XẾP HẠNG</button>
+<button onClick={() => setScreen('login')} style={{ width:'100%', padding:9, borderRadius:10, background:'rgba(255,255,255,0.05)', border:'1px solid rgba(255,255,255,0.12)', color:'rgba(255,255,255,0.5)', fontSize:11, cursor:'pointer', fontFamily:'monospace' }}>Đổi nickname</button>
+</div>
+</div>
+</div>
+</>
+);
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<HoloBlock />);
+</script>
+
+</body>
+</html>
