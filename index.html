@@ -100,15 +100,24 @@ const emptyRatio = grid => {
 };
 
 // ═══════════════════════════════════════════
-// STORAGE — dùng localStorage (offline-ready)
+// STORAGE — JSONBin.io (online leaderboard)
 // ═══════════════════════════════════════════
-const STORAGE_KEY = 'holo_lb4';
-const loadBoard = () => {
-  try { const v = localStorage.getItem(STORAGE_KEY); return v ? JSON.parse(v) : []; }
-  catch { return []; }
+const JSONBIN_BIN_ID  = '6a3b6036da38895dfef5645b';
+const JSONBIN_API_KEY = '$2a$10$nHKNMyjd2md2fhADPB0fc.R/vwTLbkJqlf0hBXDSe5u.pZqZ1Olbm';
+const JSONBIN_URL     = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
+
+const loadBoard = async () => {
+  try {
+    const res = await fetch(JSONBIN_URL + '/latest', {
+      headers: { 'X-Master-Key': JSONBIN_API_KEY }
+    });
+    const data = await res.json();
+    return Array.isArray(data.record) ? data.record : [];
+  } catch { return []; }
 };
-const saveScore = (nickname, score) => {
-  const board = loadBoard();
+
+const saveScore = async (nickname, score) => {
+  const board = await loadBoard();
   const now   = new Date().toISOString();
   const idx   = board.findIndex(p => p.nickname === nickname);
   if (idx >= 0) {
@@ -120,7 +129,13 @@ const saveScore = (nickname, score) => {
     board.push({ nickname, best: score, last: score, games: 1, joinedAt: now, lastAt: now });
   }
   board.sort((a, b) => b.best - a.best);
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(board)); } catch {}
+  try {
+    await fetch(JSONBIN_URL, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
+      body: JSON.stringify(board)
+    });
+  } catch {}
   return board;
 };
 
@@ -317,7 +332,7 @@ const LeaderboardPage = ({ board, currentNick, onBack }) => {
 function HoloBlock() {
   const [screen,      setScreen]      = useState('login');
   const [nickname,    setNickname]    = useState('');
-  const [board,       setBoard]       = useState(() => loadBoard());
+  const [board,       setBoard]       = useState([]);
   const [currentNick, setCurrentNick] = useState('');
 
   const [gs,         setGs]        = useState(9);
@@ -361,6 +376,12 @@ function HoloBlock() {
   const pidRef   = useRef(0);
   const gridElRef = useRef(null);
   const rafRef    = useRef(null);
+
+  useEffect(() => {
+    if (screen === 'login' || screen === 'leaderboard') {
+      loadBoard().then(b => setBoard(b)).catch(() => {});
+    }
+  }, [screen]);
 
   useEffect(() => { G.current   = grid;      }, [grid]);
   useEffect(() => { T.current   = tray;      }, [tray]);
@@ -599,10 +620,10 @@ function HoloBlock() {
     if (isClick) { handleCellClick(r, c); }
   }, [handleCellClick]);
 
-  const startGame = useCallback((name) => {
+  const startGame = useCallback(async (name) => {
     if (!name.trim()) return;
     try { getAudio(); } catch {}
-    const b = loadBoard();
+    const b = await loadBoard();
     const player = b.find(p => p.nickname === name);
     setCurrentNick(name);
     const pb = player?.best || 0; setBest(pb); B.current=pb;
@@ -619,8 +640,8 @@ function HoloBlock() {
     setScreen('game');
   }, []);
 
-  const endGame = useCallback(() => {
-    const nb = saveScore(currentNick, S.current);
+  const endGame = useCallback(async () => {
+    const nb = await saveScore(currentNick, S.current);
     setBoard(nb); setScreen('result');
   }, [currentNick]);
 
