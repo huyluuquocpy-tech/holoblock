@@ -100,20 +100,31 @@ const emptyRatio = grid => {
 };
 
 // ═══════════════════════════════════════════
-// STORAGE — JSONBin.io (online leaderboard)
+// STORAGE — Online Leaderboard (JSONBin.io)
 // ═══════════════════════════════════════════
-const JSONBIN_BIN_ID  = '6a3b6036da38895dfef5645b';
-const JSONBIN_API_KEY = '$2a$10$nHKNMyjd2md2fhADPB0fc.R/vwTLbkJqlf0hBXDSe5u.pZqZ1Olbm';
+// ⚠️ THAY 2 GIÁ TRỊ NÀY SAU KHI TẠO JSONBin:
+const JSONBIN_BIN_ID  = 'REPLACE_BIN_ID_HERE';
+const JSONBIN_API_KEY = 'REPLACE_API_KEY_HERE';
 const JSONBIN_URL     = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
+
+// Cache local để fallback khi mất mạng
+const LOCAL_KEY = 'holo_lb_cache';
+const getCache  = () => { try { const v = localStorage.getItem(LOCAL_KEY); return v ? JSON.parse(v) : []; } catch { return []; } };
+const setCache  = d  => { try { localStorage.setItem(LOCAL_KEY, JSON.stringify(d)); } catch {} };
 
 const loadBoard = async () => {
   try {
     const res = await fetch(JSONBIN_URL + '/latest', {
-      headers: { 'X-Master-Key': JSONBIN_API_KEY }
+      headers: { 'X-Master-Key': JSONBIN_API_KEY, 'X-Bin-Meta': 'false' }
     });
+    if (!res.ok) throw new Error('fetch failed');
     const data = await res.json();
-    return Array.isArray(data.record) ? data.record : [];
-  } catch(e) { return []; }
+    const board = Array.isArray(data) ? data : [];
+    setCache(board);
+    return board;
+  } catch {
+    return getCache(); // fallback về local nếu mất mạng
+  }
 };
 
 const saveScore = async (nickname, score) => {
@@ -129,13 +140,14 @@ const saveScore = async (nickname, score) => {
     board.push({ nickname, best: score, last: score, games: 1, joinedAt: now, lastAt: now });
   }
   board.sort((a, b) => b.best - a.best);
+  setCache(board);
   try {
     await fetch(JSONBIN_URL, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', 'X-Master-Key': JSONBIN_API_KEY },
       body: JSON.stringify(board)
     });
-  } catch(e) {}
+  } catch { /* lưu cache local nếu lỗi */ }
   return board;
 };
 
@@ -156,7 +168,7 @@ const beep = (freq, dur, type = 'sine', vol = 0.1) => {
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + dur);
     osc.connect(gain).connect(ctx.destination);
     osc.start(); osc.stop(ctx.currentTime + dur);
-  } catch(e) {}
+  } catch {}
 };
 const sfxPlace  = ()  => beep(520, 0.04, 'sine', 0.07);
 const sfxClear  = n   => { beep(660+n*60,0.1,'sine',0.12); setTimeout(()=>beep(880+n*60,0.09,'sine',0.09),75); };
@@ -269,7 +281,7 @@ const LeaderboardPage = ({ board, currentNick, onBack }) => {
 
       {board.length > 0 && (
         <div style={{ width:'100%', maxWidth:380, display:'flex', gap:8, marginBottom:16 }}>
-          {[{ label:'NGƯỜI CHƠI', value: board.length }, { label:'TOP SCORE', value: (board[0] && board[0].best != null ? board[0].best.toLocaleString() : '0') }, { label:'TỔNG VÁN', value: board.reduce((s,p)=>s+(p.games||1),0) }].map(s => (
+          {[{ label:'NGƯỜI CHƠI', value: board.length }, { label:'TOP SCORE', value: board[0]?.best?.toLocaleString() }, { label:'TỔNG VÁN', value: board.reduce((s,p)=>s+(p.games||1),0) }].map(s => (
             <div key={s.label} style={{ flex:1, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(0,255,187,0.15)', borderRadius:10, padding:'10px 6px', textAlign:'center' }}>
               <div style={{ color:'rgba(255,255,255,0.35)', fontSize:7, fontFamily:'monospace', letterSpacing:1, marginBottom:4 }}>{s.label}</div>
               <div style={{ color:'#00ffaa', fontSize:14, fontWeight:900, fontFamily:'monospace' }}>{s.value}</div>
@@ -332,7 +344,7 @@ const LeaderboardPage = ({ board, currentNick, onBack }) => {
 function HoloBlock() {
   const [screen,      setScreen]      = useState('login');
   const [nickname,    setNickname]    = useState('');
-  const [board,       setBoard]       = useState([]);
+  const [board,       setBoard]       = useState(() => getCache()); // dùng cache lúc init, load online sau
   const [currentNick, setCurrentNick] = useState('');
 
   const [gs,         setGs]        = useState(9);
@@ -376,12 +388,6 @@ function HoloBlock() {
   const pidRef   = useRef(0);
   const gridElRef = useRef(null);
   const rafRef    = useRef(null);
-
-  useEffect(() => {
-    if (screen === 'login' || screen === 'leaderboard') {
-      loadBoard().then(b => setBoard(b)).catch(() => {});
-    }
-  }, [screen]);
 
   useEffect(() => { G.current   = grid;      }, [grid]);
   useEffect(() => { T.current   = tray;      }, [tray]);
@@ -460,8 +466,8 @@ function HoloBlock() {
     if (APU.current) return;
     e.preventDefault();
     const piece = T.current[idx]; if (!piece) return;
-    try { getAudio(); } catch(e) {}
-    const t = (e.touches && e.touches[0]) || e;
+    try { getAudio(); } catch {}
+    const t = e.touches?.[0] || e;
     dragState.current = { idx, piece, x: t.clientX, y: t.clientY, preview: null, previewValid: false };
     setDragVisible({ piece });
     cancelAnimationFrame(rafRef.current);
@@ -471,7 +477,7 @@ function HoloBlock() {
   const onMove = useCallback((e) => {
     if (!dragState.current) return;
     e.preventDefault(); // Chặn scroll khi đang kéo khối trên mobile
-    const t = (e.touches && e.touches[0]) || e;
+    const t = e.touches?.[0] || e;
     dragState.current.x = t.clientX;
     dragState.current.y = t.clientY;
   }, []);
@@ -570,7 +576,7 @@ function HoloBlock() {
   }, [onMove, onEnd]);
 
   const activatePU = useCallback((pu) => {
-    if (APU.current && APU.current.id === pu.id) { setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null; return; }
+    if (APU.current?.id === pu.id) { setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null; return; }
     setActivePU({ type: pu.type, id: pu.id }); APU.current = { type: pu.type, id: pu.id };
     if (pu.type === 'hammer') { setHammerMode('row'); HM.current = 'row'; }
   }, []);
@@ -614,49 +620,39 @@ function HoloBlock() {
 
   const onCellPointer = useCallback((e, isClick=false) => {
     if (!APU.current) return;
-    const target = (e.target && e.target.closest ? e.target.closest('[data-r]') : null) || e.target;
-    if (!target || !target.dataset || !target.dataset.r) return;
+    const target = e.target?.closest?.('[data-r]') || e.target;
+    if (!target?.dataset?.r) return;
     const r = parseInt(target.dataset.r), c = parseInt(target.dataset.c);
     if (isClick) { handleCellClick(r, c); }
   }, [handleCellClick]);
 
-  const startGame = useCallback(function(name) {
+  const startGame = useCallback(async (name) => {
     if (!name.trim()) return;
-    try { getAudio(); } catch(e) {}
-    function doStart(b) {
-      var player = b.find(function(p) { return p.nickname === name; });
-      setCurrentNick(name);
-      var pb = (player && player.best) || 0; setBest(pb); B.current=pb;
-      L.current=1; GS.current=9; C.current=0; S.current=0;
-      var g=makeGrid(9), t=freshTray();
-      G.current=g; T.current=t;
-      setGs(9); setGrid(g); setTray(t); setScore(0); setLevel(1); setCombo(0);
-      setGameOver(false); setParticles([]); setFlash({ rows:[],cols:[] });
-      setPowerups([]); PU.current=[];
-      setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
-      setScorePops([]); setLvlMsg(null); setComboAnim(null);
-      setStreakFire(false); setStreakCount(0); setDanger(false); prevDanger.current=false;
-      dragState.current=null; setDragVisible(null);
-      setScreen('game');
-    }
-    loadBoard().then(doStart).catch(function() { doStart([]); });
+    try { getAudio(); } catch {}
+    const b = await loadBoard();
+    setBoard(b);
+    const player = b.find(p => p.nickname === name);
+    setCurrentNick(name);
+    const pb = player?.best || 0; setBest(pb); B.current=pb;
+    L.current=1; GS.current=9; C.current=0; S.current=0;
+    const g=makeGrid(9), t=freshTray();
+    G.current=g; T.current=t;
+    setGs(9); setGrid(g); setTray(t); setScore(0); setLevel(1); setCombo(0);
+    setGameOver(false); setParticles([]); setFlash({ rows:[],cols:[] });
+    setPowerups([]); PU.current=[];
+    setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
+    setScorePops([]); setLvlMsg(null); setComboAnim(null);
+    setStreakFire(false); setStreakCount(0); setDanger(false); prevDanger.current=false;
+    dragState.current=null; setDragVisible(null);
+    setScreen('game');
   }, []);
 
-  const endGame = useCallback(function() {
-    saveScore(currentNick, S.current).then(function(nb) {
-      setBoard(nb); setScreen('result');
-    }).catch(function() {
-      setScreen('result');
-    });
+  const endGame = useCallback(async () => {
+    const nb = await saveScore(currentNick, S.current);
+    setBoard(nb); setScreen('result');
   }, [currentNick]);
 
-  const [winW, setWinW] = useState(typeof window !== 'undefined' ? window.innerWidth : 375);
-  useEffect(() => {
-    const onResize = () => setWinW(window.innerWidth);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  const cp  = Math.floor((Math.min(winW - 16, 420) - 6 - (gs-1)) / gs);
+  const cp  = Math.floor((Math.min(window.innerWidth - 16, 420) - 6 - (gs-1)) / gs);
   const aw  = cp * gs + (gs-1) + 6;
   const lvlProg = level===1 ? Math.min(score/700,1) : level===2 ? Math.min((score-700)/800,1) : 1;
   const myRank  = board.findIndex(p => p.nickname === currentNick) + 1;
@@ -683,6 +679,13 @@ function HoloBlock() {
   const BG = { minHeight:'100vh', background:'radial-gradient(ellipse 100% 75% at 50% -10%,#1c0440 0%,#080018 40%,#000 100%)', display:'flex', flexDirection:'column', alignItems:'center', padding:'12px 8px 28px', userSelect:'none', WebkitUserSelect:'none' };
 
   // ── LEADERBOARD ──
+  // Load leaderboard online khi vào màn hình leaderboard hoặc login
+  useEffect(() => {
+    if (screen === 'login' || screen === 'leaderboard') {
+      loadBoard().then(b => setBoard(b));
+    }
+  }, [screen]);
+
   if (screen === 'leaderboard') return (
     <><style>{CSS}</style>
 
@@ -848,7 +851,7 @@ if (screen === 'game') return (
         <div style={{ color:'rgba(255,255,255,0.3)', fontSize:8, fontFamily:'monospace', letterSpacing:2, textAlign:'center', marginBottom:8 }}>KHO POWERUP — TAP ĐỂ DÙNG</div>
         <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'center' }}>
           {powerups.map(pu => {
-            const isBomb=pu.type==='bomb', isActive=activePU && activePU.id===pu.id;
+            const isBomb=pu.type==='bomb', isActive=activePU?.id===pu.id;
             return (
               <div key={pu.id} onClick={() => activatePU(pu)}
                 style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:3, padding:'8px 16px', borderRadius:10,
@@ -867,7 +870,7 @@ if (screen === 'game') return (
   </div>
 
   <div id="drag-ghost" style={{ position:'fixed', display:'none', pointerEvents:'none', zIndex:1000, filter:'drop-shadow(0 0 10px rgba(255,255,255,0.25))' }}>
-    {dragVisible && dragVisible.piece && <PieceView cells={dragVisible.piece.cells} color={dragVisible.piece.color} cellPx={cp} />}
+    {dragVisible?.piece && <PieceView cells={dragVisible.piece.cells} color={dragVisible.piece.color} cellPx={cp} />}
   </div>
 
   {gameOver && (
@@ -907,11 +910,7 @@ return (
 );
 }
 
-try {
-  ReactDOM.createRoot(document.getElementById('root')).render(<HoloBlock />);
-} catch(e) {
-  document.getElementById('root').innerHTML = '<div style="color:#ff4444;font-family:monospace;padding:20px;background:#000;min-height:100vh;">Lỗi khởi động: ' + e.message + '</div>';
-}
+ReactDOM.createRoot(document.getElementById('root')).render(<HoloBlock />);
 </script>
 
 </body>
