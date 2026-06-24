@@ -269,7 +269,7 @@ const LeaderboardPage = ({ board, currentNick, onBack }) => {
 
       {board.length > 0 && (
         <div style={{ width:'100%', maxWidth:380, display:'flex', gap:8, marginBottom:16 }}>
-          {[{ label:'NGƯỜI CHƠI', value: board.length }, { label:'TOP SCORE', value: board[0]?.best?.toLocaleString() }, { label:'TỔNG VÁN', value: board.reduce((s,p)=>s+(p.games||1),0) }].map(s => (
+          {[{ label:'NGƯỜI CHƠI', value: board.length }, { label:'TOP SCORE', value: (board[0] && board[0].best != null ? board[0].best.toLocaleString() : '0') }, { label:'TỔNG VÁN', value: board.reduce((s,p)=>s+(p.games||1),0) }].map(s => (
             <div key={s.label} style={{ flex:1, background:'rgba(255,255,255,0.04)', border:'1px solid rgba(0,255,187,0.15)', borderRadius:10, padding:'10px 6px', textAlign:'center' }}>
               <div style={{ color:'rgba(255,255,255,0.35)', fontSize:7, fontFamily:'monospace', letterSpacing:1, marginBottom:4 }}>{s.label}</div>
               <div style={{ color:'#00ffaa', fontSize:14, fontWeight:900, fontFamily:'monospace' }}>{s.value}</div>
@@ -461,7 +461,7 @@ function HoloBlock() {
     e.preventDefault();
     const piece = T.current[idx]; if (!piece) return;
     try { getAudio(); } catch(e) {}
-    const t = e.touches?.[0] || e;
+    const t = (e.touches && e.touches[0]) || e;
     dragState.current = { idx, piece, x: t.clientX, y: t.clientY, preview: null, previewValid: false };
     setDragVisible({ piece });
     cancelAnimationFrame(rafRef.current);
@@ -471,7 +471,7 @@ function HoloBlock() {
   const onMove = useCallback((e) => {
     if (!dragState.current) return;
     e.preventDefault(); // Chặn scroll khi đang kéo khối trên mobile
-    const t = e.touches?.[0] || e;
+    const t = (e.touches && e.touches[0]) || e;
     dragState.current.x = t.clientX;
     dragState.current.y = t.clientY;
   }, []);
@@ -570,7 +570,7 @@ function HoloBlock() {
   }, [onMove, onEnd]);
 
   const activatePU = useCallback((pu) => {
-    if (APU.current?.id === pu.id) { setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null; return; }
+    if (APU.current && APU.current.id === pu.id) { setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null; return; }
     setActivePU({ type: pu.type, id: pu.id }); APU.current = { type: pu.type, id: pu.id };
     if (pu.type === 'hammer') { setHammerMode('row'); HM.current = 'row'; }
   }, []);
@@ -614,35 +614,40 @@ function HoloBlock() {
 
   const onCellPointer = useCallback((e, isClick=false) => {
     if (!APU.current) return;
-    const target = e.target?.closest?.('[data-r]') || e.target;
-    if (!target?.dataset?.r) return;
+    const target = (e.target && e.target.closest ? e.target.closest('[data-r]') : null) || e.target;
+    if (!target || !target.dataset || !target.dataset.r) return;
     const r = parseInt(target.dataset.r), c = parseInt(target.dataset.c);
     if (isClick) { handleCellClick(r, c); }
   }, [handleCellClick]);
 
-  const startGame = useCallback(async (name) => {
+  const startGame = useCallback(function(name) {
     if (!name.trim()) return;
     try { getAudio(); } catch(e) {}
-    const b = await loadBoard();
-    const player = b.find(p => p.nickname === name);
-    setCurrentNick(name);
-    const pb = player?.best || 0; setBest(pb); B.current=pb;
-    L.current=1; GS.current=9; C.current=0; S.current=0;
-    const g=makeGrid(9), t=freshTray();
-    G.current=g; T.current=t;
-    setGs(9); setGrid(g); setTray(t); setScore(0); setLevel(1); setCombo(0);
-    setGameOver(false); setParticles([]); setFlash({ rows:[],cols:[] });
-    setPowerups([]); PU.current=[];
-    setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
-    setScorePops([]); setLvlMsg(null); setComboAnim(null);
-    setStreakFire(false); setStreakCount(0); setDanger(false); prevDanger.current=false;
-    dragState.current=null; setDragVisible(null);
-    setScreen('game');
+    function doStart(b) {
+      var player = b.find(function(p) { return p.nickname === name; });
+      setCurrentNick(name);
+      var pb = (player && player.best) || 0; setBest(pb); B.current=pb;
+      L.current=1; GS.current=9; C.current=0; S.current=0;
+      var g=makeGrid(9), t=freshTray();
+      G.current=g; T.current=t;
+      setGs(9); setGrid(g); setTray(t); setScore(0); setLevel(1); setCombo(0);
+      setGameOver(false); setParticles([]); setFlash({ rows:[],cols:[] });
+      setPowerups([]); PU.current=[];
+      setActivePU(null); APU.current=null; setHammerMode(null); HM.current=null;
+      setScorePops([]); setLvlMsg(null); setComboAnim(null);
+      setStreakFire(false); setStreakCount(0); setDanger(false); prevDanger.current=false;
+      dragState.current=null; setDragVisible(null);
+      setScreen('game');
+    }
+    loadBoard().then(doStart).catch(function() { doStart([]); });
   }, []);
 
-  const endGame = useCallback(async () => {
-    const nb = await saveScore(currentNick, S.current);
-    setBoard(nb); setScreen('result');
+  const endGame = useCallback(function() {
+    saveScore(currentNick, S.current).then(function(nb) {
+      setBoard(nb); setScreen('result');
+    }).catch(function() {
+      setScreen('result');
+    });
   }, [currentNick]);
 
   const [winW, setWinW] = useState(typeof window !== 'undefined' ? window.innerWidth : 375);
@@ -843,7 +848,7 @@ if (screen === 'game') return (
         <div style={{ color:'rgba(255,255,255,0.3)', fontSize:8, fontFamily:'monospace', letterSpacing:2, textAlign:'center', marginBottom:8 }}>KHO POWERUP — TAP ĐỂ DÙNG</div>
         <div style={{ display:'flex', gap:8, flexWrap:'wrap', justifyContent:'center' }}>
           {powerups.map(pu => {
-            const isBomb=pu.type==='bomb', isActive=activePU?.id===pu.id;
+            const isBomb=pu.type==='bomb', isActive=activePU && activePU.id===pu.id;
             return (
               <div key={pu.id} onClick={() => activatePU(pu)}
                 style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:3, padding:'8px 16px', borderRadius:10,
@@ -862,7 +867,7 @@ if (screen === 'game') return (
   </div>
 
   <div id="drag-ghost" style={{ position:'fixed', display:'none', pointerEvents:'none', zIndex:1000, filter:'drop-shadow(0 0 10px rgba(255,255,255,0.25))' }}>
-    {dragVisible?.piece && <PieceView cells={dragVisible.piece.cells} color={dragVisible.piece.color} cellPx={cp} />}
+    {dragVisible && dragVisible.piece && <PieceView cells={dragVisible.piece.cells} color={dragVisible.piece.color} cellPx={cp} />}
   </div>
 
   {gameOver && (
@@ -902,7 +907,11 @@ return (
 );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<HoloBlock />);
+try {
+  ReactDOM.createRoot(document.getElementById('root')).render(<HoloBlock />);
+} catch(e) {
+  document.getElementById('root').innerHTML = '<div style="color:#ff4444;font-family:monospace;padding:20px;background:#000;min-height:100vh;">Lỗi khởi động: ' + e.message + '</div>';
+}
 </script>
 
 </body>
